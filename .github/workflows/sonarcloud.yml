@@ -1,0 +1,95 @@
+
+name: "SonarCloud Analysis"
+
+on:
+  push:
+    branches: ["master"]
+  workflow_dispatch: {}
+
+jobs:
+  sonar-scan:
+    name: SonarCloud Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect root project
+        id: find-root
+        shell: bash
+        run: |
+          set -e
+          PROJECT_DIR="."
+          ALL=$(find . -name "settings.gradle*" -print)
+          if [ -n "$ALL" ]; then
+            LATEST=0
+            for f in $ALL; do
+              TS=$(git log -1 --format=%ct -- "$(dirname "$f")")
+              if [ "$TS" -gt "$LATEST" ]; then
+                LATEST=$TS
+                PROJECT_DIR=$(dirname "$f")
+              fi
+            done
+          fi
+          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] || [ -f "pom.xml" ]; then
+            PROJECT_DIR="."
+          fi
+          echo "PROJECT_PATH=$PROJECT_DIR" >> $GITHUB_ENV
+
+      - name: Determine Java Version
+        id: determine-java
+        shell: bash
+        run: |
+          set -e
+          PROPS="gradle/wrapper/gradle-wrapper.properties"
+          JAVA_VERSION=17
+          if [ -f "$PROPS" ]; then
+            GRADLE_VER=$(grep -oP 'gradle-\K[0-9.]*(?=-)' "$PROPS" || echo "")
+            if [[ "$GRADLE_VER" == 4.* ]]; then
+              echo "Detected Gradle $GRADLE_VER → using Java 8"
+              JAVA_VERSION=8
+            else
+              echo "Detected Gradle $GRADLE_VER → using Java 17"
+            fi
+          else
+            echo "No gradle-wrapper.properties → default Java 17"
+          fi
+          echo "JAVA_VERSION=$JAVA_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: ${{ steps.determine-java.outputs.JAVA_VERSION }}
+
+      - name: Build and Analyze Project
+        id: build-analyze
+        working-directory: ${{ env.PROJECT_PATH }}
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          BASE_SONAR_ARGS: "-Dsonar.projectKey=grilo-org_20250730T153820_bublitz_android-je -Dsonar.organization=grilo-org -Dsonar.host.url=https://sonarcloud.io -Dsonar.sources=app/src"
+        run: |
+          set -e
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew build sonarqube               -Dsonar.login=${{ secrets.SONAR_TOKEN }}               ${BASE_SONAR_ARGS}
+          elif [ -f "pom.xml" ]; then
+            mvn clean verify               sonar:sonar               -Dsonar.login=${{ secrets.SONAR_TOKEN }}               ${BASE_SONAR_ARGS}
+          else
+            echo "❌ No build tool found (gradlew or pom.xml). Aborting."
+            exit 1
+          fi
+
+      - name: SonarCloud Scan (Fallback)
+        if: failure()
+        uses: SonarSource/sonarqube-scan-action@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          projectBaseDir: ${{ env.PROJECT_PATH }}
+          args: -Dsonar.projectKey=grilo-org_20250730T153820_bublitz_android-je -Dsonar.organization=grilo-org -Dsonar.host.url=https://sonarcloud.io -Dsonar.sources=app/src -Dsonar.java.binaries=target/classes
